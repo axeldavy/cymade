@@ -1,4 +1,20 @@
-from libcpp.atomic cimport atomic
+#!python
+#cython: language_level=3
+#cython: boundscheck=False
+#cython: wraparound=False
+#cython: nonecheck=False
+#cython: embedsignature=False
+#cython: cdivision=True
+#cython: cdivision_warnings=False
+#cython: always_allow_keywords=False
+#cython: profile=False
+#cython: infer_types=False
+#cython: initializedcheck=False
+#cython: c_line_in_traceback=False
+#cython: auto_pickle=False
+#distutils: language=c++
+
+
 from libcpp.queue cimport priority_queue
 from libcpp.map cimport map as cpp_map, pair
 from libc.stdint cimport int64_t
@@ -6,12 +22,15 @@ from libc.stdint cimport int64_t
 from cpython.object cimport PyObject
 from cpython.ref cimport Py_DECREF, Py_INCREF, Py_XDECREF
 
+cimport cython
+
 import os
 import threading
 import traceback
 from weakref import WeakKeyDictionary
 
 from .cpp_includes cimport mutex, unique_lock, condition_variable, defer_lock_t
+from .cpp_includes cimport atomic, atomic_flag, memory_order_acquire, memory_order_release
 from .atomic cimport lock_gil_friendly
 
 cdef extern from * nogil:
@@ -87,7 +106,7 @@ cdef class Worker:
         thread.start()
         return worker
 
-
+@cython.final
 cdef class Future:
     """
     An optimized future object representing the result of asynchronous computation.
@@ -824,6 +843,7 @@ cdef extern from *:
 
     void move_top_from_queue(Command& dst, priority_queue[Command]& queue)
 
+@cython.final
 cdef class ThreadPool:
     """
     An efficient thread pool implementation that extends the standard threadpool API
@@ -1003,70 +1023,41 @@ cdef class ThreadPool:
         If negative priority jobs are active, only process negative priority jobs.
         For positive priority jobs, enforce waiting period based on priority in milliseconds.
         """
-        cdef Command element
         cdef Future future
-        cdef int microwaits
-        cdef bint has_blocking_jobs
-        cdef long long current_time_us
-        cdef long long last_blocking_time
-        cdef long long wait_time_us
-        cdef unique_lock[mutex] queue_mutex = unique_lock[mutex](self._queue_mutex, defer_lock_t())
         
+        cdef unique_lock[mutex] queue_mutex = unique_lock[mutex](self._queue_mutex, defer_lock_t())
+
+        """
+        The reason we separate fetch and wait (wait doesn't return the future)
+        is to give advantage to the thread holding the gil to fetch the future
+        over the other threads. This gives significant performance boosts,
+        because the threads waiting for work have a non negligible startup time,
+        while the thread holding the gil is already running and can start immediately.
+
+        Basically:
+        thread A running and holding the GIL for some of its operation
+        thread B is woken up in _wait_for_work because some work is scheduled
+        thread B is stuck when leaving _wait_for_work because to leave
+            the nogil section it must locks the GIL and A has it. Note that
+            at this point is has released the queue mutex. B is thus
+            waiting for A to release the GIL.
+        thread A finishes its work.
+        -> Giving the work to A gives better performance because A is running
+        already. Letting B take over has the overhead of several hundred python
+        operations.
+        """
+
         while True:
-            # Wait for a future to be scheduled
-            with nogil:
-                microwaits = 1
-                while True:
-                    if self._shutdown.load():
-                        break
-
-                    # lock the queue
-                    if not queue_mutex.owns_lock():
-                        queue_mutex.lock()
-
-                    if self._queue.empty():
-                        self._work_condition.wait_for(queue_mutex, to_chrono_us(10000))
-                        continue
-
-                    # Check if there are blocking jobs
-                    has_blocking_jobs = self._blocking_jobs.load() > 0
-
-                    # If blocking jobs active and this is a non-negative priority job, wait
-                    if has_blocking_jobs and self._queue.top().priority >= 0:
-                        self._work_condition.wait_for(queue_mutex, to_chrono_us(10))
-                        continue
-                        
-                    # Check time-based priority for positive priority jobs
-                    if self._queue.top().priority > 0:
-                        current_time_us = get_current_time_us()
-                        last_blocking_time = self._last_blocking_job_finished_us.load()
-                        # Convert priority in ms to microseconds
-                        wait_time_us = seconds_to_us(self._queue.top().priority / 1000.0)
-                            
-                        # If not enough time has passed, wait and try again
-                        if current_time_us < last_blocking_time + wait_time_us:
-                            self._work_condition.wait_for(
-                                queue_mutex,
-                                to_chrono_us(last_blocking_time + wait_time_us - current_time_us + 1)
-                            )
-                            continue
-
-                    break
-
             if self._shutdown.load():
                 return None
+            future = self._fetch_work()
+            if future is not None:
+                break
+            with nogil:
+                self._wait_for_work()
 
-            assert queue_mutex.owns_lock()
-            move_top_from_queue(element, self._queue)
-            queue_mutex.unlock()
-            future = <object>element.get_future()
-            
-            # If the future no longer exists, skip it
-            if future is None:
-                continue
-                
-            # Return the future
-            return future
+        # Return the future
+        return future
 
     def report_error(self, Future future, Exception e, str traceback) -> None:
         """
@@ -1076,6 +1067,93 @@ cdef class ThreadPool:
         print(traceback)
 
     ### Internal functions ###
+
+    cdef Future _fetch_work(self):
+        """
+        Internal function of wait_for_work which fetches
+        the next work item from the queue, None if none
+        meet the criteria, or if the queue is busy.
+        """
+        cdef Command element
+        cdef unique_lock[mutex] queue_mutex = unique_lock[mutex](self._queue_mutex, defer_lock_t())
+        cdef long long current_time_us
+        cdef long long last_blocking_time
+        cdef long long wait_time_us
+
+        if not queue_mutex.try_lock():
+            return None
+
+        if self._queue.empty():
+            return None
+
+        if self._queue.top().priority < 0:
+            move_top_from_queue(element, self._queue)
+            return <object>element.get_future()
+
+         # If any blocking jobs is active, top must be negative
+        if self._blocking_jobs.load() > 0:
+            return None
+
+        # Check time-based priority for positive priority jobs
+        if self._queue.top().priority > 0:
+            current_time_us = get_current_time_us()
+            last_blocking_time = self._last_blocking_job_finished_us.load()
+            # Convert priority in ms to microseconds
+            wait_time_us = seconds_to_us(self._queue.top().priority / 1000.0)
+
+            # If not enough time has passed, wait and try again
+            if current_time_us < last_blocking_time + wait_time_us:
+                return None
+
+        move_top_from_queue(element, self._queue)
+        return <object>element.get_future()
+
+    cdef void _wait_for_work(self) noexcept nogil:
+        """
+        Internal function of wait_for_work which waits
+        that a compatible item is available in the queue.
+        """
+        cdef unique_lock[mutex] queue_mutex = unique_lock[mutex](self._queue_mutex)
+        cdef long long current_time_us
+        cdef long long last_blocking_time
+        cdef long long wait_time_us
+
+        while True:
+            if self._shutdown.load():
+                return
+
+            # Wait the queue is filled, but check every 10 ms if we should shutdown
+            if self._queue.empty():
+                self._work_condition.wait_for(queue_mutex, to_chrono_us(10000))
+                continue
+
+            if self._queue.top().priority < 0:
+                return
+
+            # If any blocking jobs is active, top must be negative
+            if self._blocking_jobs.load() > 0:
+                self._work_condition.wait_for(queue_mutex, to_chrono_us(10))
+                continue
+
+            # Check time-based priority for positive priority jobs
+            if self._queue.top().priority > 0:
+                current_time_us = get_current_time_us()
+                last_blocking_time = self._last_blocking_job_finished_us.load()
+                # Convert priority in ms to microseconds
+                wait_time_us = seconds_to_us(self._queue.top().priority / 1000.0)
+                # clamp wait to 10ms to check for shutdowns
+                wait_time_us = min(wait_time_us, 10000)
+
+                # If not enough time has passed, wait and try again
+                if current_time_us < last_blocking_time + wait_time_us:
+                    self._work_condition.wait_for(
+                        queue_mutex,
+                        to_chrono_us(last_blocking_time + wait_time_us - current_time_us + 1)
+                    )
+                    continue
+
+            return
+
     cdef void _schedule(self, double priority, Future future):
         """
         Make the work visible to workers

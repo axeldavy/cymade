@@ -9,13 +9,13 @@ extensions = [
         "cymade.atomic",
         ["cymade/atomic.pyx"],
         language="c++",
-        extra_compile_args=["-std=c++11"],
+        extra_compile_args=["-std=c++20"],
     ),
     Extension(
         "cymade.threadpool",
         ["cymade/threadpool.pyx"],
         language="c++",
-        extra_compile_args=["-std=c++11"],
+        extra_compile_args=["-std=c++20"],
     ),
 ]
 
