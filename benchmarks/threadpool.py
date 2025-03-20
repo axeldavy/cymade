@@ -1,10 +1,10 @@
 from cymade.threadpool import ThreadPool
 from concurrent.futures import ThreadPoolExecutor
-import numpy as np
-import time
-import tabulate
 import math
-import statistics
+import numpy as np
+import tabulate
+import threading
+import time
 
 def submission_benchmark():
     """Benchmark the submission overhead of ThreadPool vs ThreadPoolExecutor"""
@@ -234,10 +234,15 @@ def short_tasks_benchmark(num_workers=4, num_tasks=10000):
 
 def priority_scheduling_benchmark(num_workers=4, num_tasks=100):
     """Benchmark priority scheduling in ThreadPool vs standard ThreadPoolExecutor"""
-    
+
+    completion_order = []
+    completion_mutex = threading.Lock()
+
     def task(delay, task_id):
+        nonlocal completion_order, completion_mutex
         time.sleep(delay)
-        return task_id
+        with completion_mutex:
+            completion_order.append(task_id)
     
     # Create pools
     threadpool = ThreadPool(num_workers)
@@ -261,10 +266,8 @@ def priority_scheduling_benchmark(num_workers=4, num_tasks=100):
         futures.append(threadpool.schedule(priority, task, delay, task_id))
     
     # Track completion order
-    completion_order = []
     for future in futures:
-        task_id = future.result()
-        completion_order.append(task_id)
+        future.result()
     
     threadpool_time = time.time() - start
     threadpool.shutdown()
@@ -274,7 +277,10 @@ def priority_scheduling_benchmark(num_workers=4, num_tasks=100):
     first_10_percent = completion_order[:num_tasks//10]
     high_priority_first = sum(1 for task_id in first_10_percent if task_id in high_priority_tasks)
     high_priority_ratio = high_priority_first / len(high_priority_tasks) if high_priority_tasks else 0
-    
+
+    # reset completion order
+    completion_order = []
+
     # ThreadPoolExecutor (no priority support)
     start = time.time()
     futures = []
@@ -282,10 +288,8 @@ def priority_scheduling_benchmark(num_workers=4, num_tasks=100):
         futures.append(executor.submit(task, delay, task_id))
     
     # Track completion order
-    completion_order = []
     for future in futures:
-        task_id = future.result()
-        completion_order.append(task_id)
+        future.result()
     
     executor_time = time.time() - start
     executor.shutdown()
@@ -462,8 +466,8 @@ def run_comprehensive_benchmark():
     results = []
     
     # Run all benchmarks
-    #results.append(submission_benchmark())
-    #results.append(launch_overhead_benchmark())
+    results.append(submission_benchmark())
+    results.append(launch_overhead_benchmark())
     results.append(cpu_bound_benchmark(num_workers=4, num_tasks=1000))
     results.append(io_bound_benchmark(num_workers=4, num_tasks=100, io_time=0.01))
     results.append(mixed_workload_benchmark(num_workers=4, num_tasks=100))
