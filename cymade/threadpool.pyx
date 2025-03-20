@@ -784,7 +784,7 @@ cdef extern from *:
                 return true;
             if (priority < other.priority)
                 return false;
-            return uuid < other.uuid;
+            return uuid > other.uuid;
         }
 
         bool operator>(const Command& other) const {
