@@ -685,12 +685,6 @@ cdef class Future:
             except Exception:
                 pass
     
-    cdef void _notify_completion(self):
-        """Notify the pool that this future has completed"""
-        if self._pool is not None:
-            self._pool._on_future_completed(self, self._priority)
-        self._pool = None
-    
     cdef void run(self):
         """Execute the callable and set the result/exception"""
         cdef unique_lock[mutex] lock
@@ -786,9 +780,9 @@ cdef extern from *:
         }
 
         bool operator<(const Command& other) const {
-            if (priority < other.priority)
-                return true;
             if (priority > other.priority)
+                return true;
+            if (priority < other.priority)
                 return false;
             return uuid < other.uuid;
         }
@@ -1132,7 +1126,7 @@ cdef class ThreadPool:
 
             # If any blocking jobs is active, top must be negative
             if self._blocking_jobs.load() > 0:
-                self._work_condition.wait_for(queue_mutex, to_chrono_us(10))
+                self._work_condition.wait_for(queue_mutex, to_chrono_us(10000))
                 continue
 
             # Check time-based priority for positive priority jobs
@@ -1170,7 +1164,8 @@ cdef class ThreadPool:
             self._last_blocking_job_finished_us.store(get_current_time_us())
         
         if priority < 0:
-            self._blocking_jobs.fetch_sub(1)
+            if self._blocking_jobs.fetch_sub(1) == 1:
+                self._work_condition.notify_all()
 
     cdef Future _submit(self, double priority, object callable):
         """
