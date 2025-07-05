@@ -20,9 +20,11 @@ from libc.stdint cimport int32_t, int64_t
 
 cimport cython
 
-import os
-import threading
-import traceback
+from asyncio import get_event_loop
+from concurrent.futures import TimeoutError, CancelledError
+from os import cpu_count
+from threading import Thread
+from traceback import format_exc
 from weakref import WeakKeyDictionary
 
 from .cpp_includes cimport mutex, unique_lock, condition_variable, defer_lock_t
@@ -87,7 +89,7 @@ cdef class Worker:
                 future.run()
             except Exception as e:
                 self._pool.report_error(
-                    future, e, traceback.format_exc()
+                    future, e, format_exc()
                 )
 
     @staticmethod
@@ -97,7 +99,7 @@ cdef class Worker:
         """
         cdef Worker worker = Worker.__new__(Worker)
         worker._pool = pool
-        thread = threading.Thread(target=worker._run)
+        thread = Thread(target=worker._run)
         thread.daemon = True
         thread.start()
         return worker
@@ -136,7 +138,7 @@ cdef class Future:
         self._callbacks = []
         self._pool = None
         self._uuid = 0
-        self._priority = 0
+        self._priority = 0.
     
     @staticmethod
     cdef Future from_callable_info(ThreadPool pool, object callable_info, int64_t uuid, double priority):
@@ -202,6 +204,39 @@ cdef class Future:
         cdef unique_lock[mutex] lock
         lock_gil_friendly(lock, self._mutex)
         return self._done
+
+    def __await__(self):
+        """
+        Makes the Future awaitable in asyncio contexts.
+        
+        This allows using the Future directly with the 'await' keyword
+        in asynchronous functions without wrapping it with asyncio.wrap_future(),
+        which isn't compatible with this implementation.
+        
+        Returns:
+        --------
+        iterator
+            An iterator compatible with the asyncio await protocol.
+        """
+        # Create an asyncio future to bridge the gap
+        loop = get_event_loop()
+        asyncio_future = loop.create_future()
+        
+        # Helper function to transfer the result when done
+        def _on_done(Future future, asyncio_future=asyncio_future):
+            cdef unique_lock[mutex] lock
+            lock_gil_friendly(lock, future._mutex)
+            if future._cancelled:
+                asyncio_future.cancel()
+            elif future._exception is not None:
+                asyncio_future.set_exception(future._exception)
+            else:
+                asyncio_future.set_result(future._result)
+        
+        self.add_done_callback(_on_done)
+
+        # Return the iterator from the asyncio Future
+        return asyncio_future.__await__()
 
     cdef int _wait_done(self, timeout):
         """Wait until the future is done"""
@@ -391,15 +426,6 @@ cdef class Future:
             self._condition.notify_all()
             # Call the callbacks
             self._call_callbacks(callbacks)
-
-
-class TimeoutError(Exception):
-    """Raised when a future operation exceeds its timeout"""
-    pass
-
-class CancelledError(Exception):
-    """Future was cancelled"""
-    pass
 
 
 cdef extern from * nogil:
@@ -608,7 +634,7 @@ cdef class ThreadPool:
         If max_workers is None, it defaults to the number of processors on the machine
         """
         if max_workers is None:
-            max_workers = os.cpu_count() or 1
+            max_workers = cpu_count() or 1
         self._max_workers = max_workers
         
         # Start the workers
