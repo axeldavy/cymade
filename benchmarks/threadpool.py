@@ -21,16 +21,16 @@ def submission_benchmark():
     n = 1000000
 
     # Measure the time taken by the ThreadPool
-    start = time.time()
+    start = time.perf_counter()
     for i in range(n):
         threadpool.submit(f, i)
-    threadpool_time = time.time() - start
+    threadpool_time = time.perf_counter() - start
 
     # Measure the time taken by the ThreadPoolExecutor
-    start = time.time()
+    start = time.perf_counter()
     for i in range(n):
         executor.submit(f, i)
-    executor_time = time.time() - start
+    executor_time = time.perf_counter() - start
     
     return {
         "Task": "Submission Overhead (1M tasks)",
@@ -54,18 +54,18 @@ def launch_overhead_benchmark():
     n = 1000000
 
     # Measure the time taken by the ThreadPool
-    start = time.time()
+    start = time.perf_counter()
     for i in range(n):
         threadpool.submit(f, i)
     threadpool.shutdown()
-    threadpool_time = time.time() - start
+    threadpool_time = time.perf_counter() - start
 
     # Measure the time taken by the ThreadPoolExecutor
-    start = time.time()
+    start = time.perf_counter()
     for i in range(n):
         executor.submit(f, i)
     executor.shutdown()
-    executor_time = time.time() - start
+    executor_time = time.perf_counter() - start
     
     return {
         "Task": "Launch Overhead (1M tasks)",
@@ -90,17 +90,17 @@ def cpu_bound_benchmark(num_workers=4, num_tasks=10000):
     tasks = [20] * num_tasks
     
     # ThreadPool
-    start = time.time()
+    start = time.perf_counter()
     futures = [threadpool.submit(fibonacci, n) for n in tasks]
     results = [future.result() for future in futures]
-    threadpool_time = time.time() - start
+    threadpool_time = time.perf_counter() - start
     threadpool.shutdown()
     
     # ThreadPoolExecutor
-    start = time.time()
+    start = time.perf_counter()
     futures = [executor.submit(fibonacci, n) for n in tasks]
     results = [future.result() for future in futures]
-    executor_time = time.time() - start
+    executor_time = time.perf_counter() - start
     executor.shutdown()
     
     print(f"CPU-bound tasks ({num_tasks} fibonacci calculations):")
@@ -129,17 +129,17 @@ def io_bound_benchmark(num_workers=4, num_tasks=100, io_time=0.01):
     tasks = [io_time] * num_tasks
     
     # ThreadPool
-    start = time.time()
+    start = time.perf_counter()
     futures = [threadpool.submit(io_task, t) for t in tasks]
     results = [future.result() for future in futures]
-    threadpool_time = time.time() - start
+    threadpool_time = time.perf_counter() - start
     threadpool.shutdown()
     
     # ThreadPoolExecutor
-    start = time.time()
+    start = time.perf_counter()
     futures = [executor.submit(io_task, t) for t in tasks]
     results = [future.result() for future in futures]
-    executor_time = time.time() - start
+    executor_time = time.perf_counter() - start
     executor.shutdown()
     
     print(f"I/O-bound tasks ({num_tasks} tasks with {io_time}s I/O time):")
@@ -173,17 +173,17 @@ def mixed_workload_benchmark(num_workers=4, num_tasks=100):
     tasks = [(i % 10000, 0.001 + (i % 5) * 0.002) for i in range(num_tasks)]
     
     # ThreadPool
-    start = time.time()
+    start = time.perf_counter()
     futures = [threadpool.submit(mixed_task, n, io) for n, io in tasks]
     results = [future.result() for future in futures]
-    threadpool_time = time.time() - start
+    threadpool_time = time.perf_counter() - start
     threadpool.shutdown()
     
     # ThreadPoolExecutor
-    start = time.time()
+    start = time.perf_counter()
     futures = [executor.submit(mixed_task, n, io) for n, io in tasks]
     results = [future.result() for future in futures]
-    executor_time = time.time() - start
+    executor_time = time.perf_counter() - start
     executor.shutdown()
     
     print(f"Mixed workload ({num_tasks} tasks):")
@@ -208,17 +208,17 @@ def short_tasks_benchmark(num_workers=4, num_tasks=10000):
     executor = ThreadPoolExecutor(num_workers)
     
     # ThreadPool
-    start = time.time()
+    start = time.perf_counter()
     futures = [threadpool.submit(short_task, i) for i in range(num_tasks)]
     results = [future.result() for future in futures]
-    threadpool_time = time.time() - start
+    threadpool_time = time.perf_counter() - start
     threadpool.shutdown()
     
     # ThreadPoolExecutor
-    start = time.time()
+    start = time.perf_counter()
     futures = [executor.submit(short_task, i) for i in range(num_tasks)]
     results = [future.result() for future in futures]
-    executor_time = time.time() - start
+    executor_time = time.perf_counter() - start
     executor.shutdown()
     
     print(f"Short tasks ({num_tasks} minimal operations):")
@@ -260,7 +260,7 @@ def priority_scheduling_benchmark(num_workers=4, num_tasks=100):
         tasks_threadpool.append((priority, 0.01, i))
     
     # ThreadPool with priority scheduling
-    start = time.time()
+    start = time.perf_counter()
     futures = []
     for priority, delay, task_id in tasks_threadpool:
         futures.append(threadpool.schedule(priority, task, delay, task_id))
@@ -269,7 +269,7 @@ def priority_scheduling_benchmark(num_workers=4, num_tasks=100):
     for future in futures:
         future.result()
     
-    threadpool_time = time.time() - start
+    threadpool_time = time.perf_counter() - start
     threadpool.shutdown()
     
     # Calculate how many high priority tasks finished in first 10%
@@ -282,7 +282,7 @@ def priority_scheduling_benchmark(num_workers=4, num_tasks=100):
     completion_order = []
 
     # ThreadPoolExecutor (no priority support)
-    start = time.time()
+    start = time.perf_counter()
     futures = []
     for _, delay, task_id in tasks_threadpool:
         futures.append(executor.submit(task, delay, task_id))
@@ -291,7 +291,7 @@ def priority_scheduling_benchmark(num_workers=4, num_tasks=100):
     for future in futures:
         future.result()
     
-    executor_time = time.time() - start
+    executor_time = time.perf_counter() - start
     executor.shutdown()
     
     print(f"Priority scheduling ({num_tasks} tasks):")
@@ -320,37 +320,37 @@ def latency_benchmark(num_workers=4, num_tasks=100):
     tasks = [(0.001 if i == 0 else 0.05, i) for i in range(num_tasks)]
     
     # ThreadPool latency
-    start = time.time()
+    start = time.perf_counter()
     futures = []
     for delay, task_id in tasks:
         futures.append(threadpool.submit(task, delay, task_id))
     
     # Get first result
     first_result = futures[0].result()
-    first_result_time = time.time() - start
+    first_result_time = time.perf_counter() - start
     
     # Wait for all tasks to complete
     for future in futures[1:]:
         future.result()
         
-    threadpool_time = time.time() - start
+    threadpool_time = time.perf_counter() - start
     threadpool.shutdown()
     
     # ThreadPoolExecutor latency
-    start = time.time()
+    start = time.perf_counter()
     futures = []
     for delay, task_id in tasks:
         futures.append(executor.submit(task, delay, task_id))
     
     # Get first result
     first_result = futures[0].result()
-    first_result_time_executor = time.time() - start
+    first_result_time_executor = time.perf_counter() - start
     
     # Wait for all tasks to complete
     for future in futures[1:]:
         future.result()
         
-    executor_time = time.time() - start
+    executor_time = time.perf_counter() - start
     executor.shutdown()
     
     print(f"Latency benchmark (time to first result):")
@@ -375,24 +375,24 @@ def throughput_benchmark(num_workers=4, task_count=10000):
     executor = ThreadPoolExecutor(num_workers)
     
     # ThreadPool throughput
-    start = time.time()
+    start = time.perf_counter()
     futures = []
     for i in range(task_count):
         futures.append(threadpool.submit(noop, i))
     
     results = [f.result() for f in futures]
-    threadpool_time = time.time() - start
+    threadpool_time = time.perf_counter() - start
     threadpool_throughput = task_count / threadpool_time
     threadpool.shutdown()
     
     # ThreadPoolExecutor throughput
-    start = time.time()
+    start = time.perf_counter()
     futures = []
     for i in range(task_count):
         futures.append(executor.submit(noop, i))
     
     results = [f.result() for f in futures]
-    executor_time = time.time() - start
+    executor_time = time.perf_counter() - start
     executor_throughput = task_count / executor_time
     executor.shutdown()
     
@@ -422,7 +422,7 @@ def worker_scaling_benchmark():
         task_count = 1000
         
         # ThreadPool
-        start = time.time()
+        start = time.perf_counter()
         futures = []
         for i in range(task_count):
             futures.append(threadpool.submit(math.sqrt, i))
@@ -430,11 +430,11 @@ def worker_scaling_benchmark():
         for future in futures:
             future.result()
         
-        threadpool_time = time.time() - start
+        threadpool_time = time.perf_counter() - start
         threadpool.shutdown()
         
         # ThreadPoolExecutor
-        start = time.time()
+        start = time.perf_counter()
         futures = []
         for i in range(task_count):
             futures.append(executor.submit(math.sqrt, i))
@@ -442,7 +442,7 @@ def worker_scaling_benchmark():
         for future in futures:
             future.result()
         
-        executor_time = time.time() - start
+        executor_time = time.perf_counter() - start
         executor.shutdown()
         
         print(f"Workers: {num_workers}, Tasks: {task_count}")
