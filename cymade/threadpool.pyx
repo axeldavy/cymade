@@ -7,7 +7,6 @@
 #cython: cdivision=True
 #cython: cdivision_warnings=False
 #cython: always_allow_keywords=False
-#cython: profile=False
 #cython: infer_types=False
 #cython: initializedcheck=False
 #cython: c_line_in_traceback=False
@@ -635,8 +634,6 @@ cdef class ThreadPool:
         For positive priority jobs, enforce waiting period based on priority in milliseconds.
         """
         cdef Future future
-        
-        cdef unique_lock[mutex] queue_mutex = unique_lock[mutex](self._queue_mutex, defer_lock_t())
 
         """
         The reason we separate fetch and wait (wait doesn't return the future)
@@ -699,6 +696,7 @@ cdef class ThreadPool:
 
         if self._queue.top().priority < 0:
             queue_pop_top(element, self._queue)
+            queue_mutex.unlock()
             return self._futures.pop(element.uuid, None)
 
         # If any blocking jobs is active, top must be negative
@@ -717,6 +715,7 @@ cdef class ThreadPool:
                 return None
 
         queue_pop_top(element, self._queue)
+        queue_mutex.unlock()
         return self._futures.pop(element.uuid, None)
 
     cdef void _wait_for_work(self) noexcept nogil:
