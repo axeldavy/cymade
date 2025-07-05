@@ -16,11 +16,7 @@
 
 
 from libcpp.queue cimport priority_queue
-from libcpp.map cimport map as cpp_map, pair
-from libc.stdint cimport int64_t
-
-from cpython.object cimport PyObject
-from cpython.ref cimport Py_DECREF, Py_INCREF, Py_XDECREF
+from libc.stdint cimport int32_t, int64_t
 
 cimport cython
 
@@ -30,7 +26,7 @@ import traceback
 from weakref import WeakKeyDictionary
 
 from .cpp_includes cimport mutex, unique_lock, condition_variable, defer_lock_t
-from .cpp_includes cimport atomic, atomic_flag, memory_order_acquire, memory_order_release
+from .cpp_includes cimport atomic
 from .atomic cimport lock_gil_friendly
 
 cdef extern from * nogil:
@@ -117,7 +113,7 @@ cdef class Future:
     """
     cdef object _result
     cdef object _exception
-    cdef object _callable
+    cdef object _callable_info
     cdef bint _cancelled
     cdef bint _running
     cdef bint _done
@@ -131,7 +127,7 @@ cdef class Future:
     def __cinit__(self):
         self._result = None
         self._exception = None
-        self._callable = None
+        self._callable_info = None
         self._cancelled = False
         self._running = False
         self._done = False
@@ -143,14 +139,14 @@ cdef class Future:
         self._priority = 0
     
     @staticmethod
-    cdef Future from_callable(ThreadPool pool, object callable, int64_t uuid, double priority):
+    cdef Future from_callable_info(ThreadPool pool, object callable_info, int64_t uuid, double priority):
         """Create a new Future from a callable"""
-        cdef Future future = Future.__new__(Future)
-        future._callable = callable
-        future._pool = pool
-        future._uuid = uuid
-        future._priority = priority
-        return future
+        cdef Future self = Future.__new__(Future)
+        self._callable_info = callable_info
+        self._pool = pool
+        self._uuid = uuid
+        self._priority = priority
+        return self
     
     @property
     def uuid(self):
@@ -181,7 +177,7 @@ cdef class Future:
 
         # Notify pool about completion
         if pool is not None:
-            pool._on_future_completed(self, self._priority)
+            pool.on_future_completed(self, self._priority)
         # Notify waiting threads
         self._condition.notify_all()
         # Call the callbacks
@@ -367,10 +363,11 @@ cdef class Future:
         
         self._running = True
         lock.unlock()
+        cdef tuple callable_info = self._callable_info
         
         # Run the callable and capture result/exception
         try:
-            result = self._callable()
+            result = callable_info[0](*callable_info[1], **callable_info[2])
             lock_gil_friendly(lock, self._mutex)
             self._result = result
         except Exception as exc:
@@ -389,7 +386,7 @@ cdef class Future:
 
             # Notify pool about completion
             if pool is not None:
-                pool._on_future_completed(self, self._priority)
+                pool.on_future_completed(self, self._priority)
             # Notify waiting threads
             self._condition.notify_all()
             # Call the callbacks
@@ -410,42 +407,10 @@ cdef extern from *:
     struct Command {
         double priority;
         int64_t uuid;
-        PyObject* future;
 
-        Command() : priority(0), uuid(0), future(nullptr) {}
+        Command() : priority(0), uuid(0) {}
 
-        Command(double p, int64_t u, PyObject* f) : priority(p), uuid(u), future(f) {
-            // increase refcount
-            Py_INCREF(f);
-        }
-
-        // Copy constructor
-        Command(const Command& other) = delete;  // Prevent copies in nogil sections
-
-        // Move constructor
-        Command(Command&& other) : priority(other.priority), uuid(other.uuid), future(other.future) {
-            other.future = nullptr;
-        }
-
-        ~Command() {
-            // Only decref if pointer is valid
-            if (future != nullptr) {
-                // Acquire GIL before decref
-                PyGILState_STATE gstate = PyGILState_Ensure();
-                Py_XDECREF(future);
-                future = nullptr;
-                PyGILState_Release(gstate);
-            }
-        }
-
-        PyObject* get_future() const {
-            if (future == nullptr) {
-                Py_INCREF(Py_None);
-                return Py_None;
-            }
-            Py_INCREF(future);
-            return future;
-        }
+        Command(double p, int64_t u) : priority(p), uuid(u) {}
 
         bool operator<(const Command& other) const {
             if (priority > other.priority)
@@ -466,29 +431,9 @@ cdef extern from *:
         bool operator!=(const Command& other) const {
             return !(*this == other);
         }
-
-        // assignment
-        Command& operator=(const Command& other) = delete;
-
-        // move assignment
-        Command& operator=(Command&& other) {
-            if (this != &other) {
-                if (future != nullptr) {
-                    // Need GIL for decref
-                    PyGILState_STATE gstate = PyGILState_Ensure();
-                    Py_DECREF(future);
-                    PyGILState_Release(gstate);
-                }
-                priority = other.priority;
-                uuid = other.uuid;
-                future = other.future;
-                other.future = nullptr;
-            }
-            return *this;
-        }
     };
     // Helper functions for queue operations
-    void move_top_from_queue(Command &dst, std::priority_queue<Command>& queue) {
+    void queue_pop_top(Command &dst, std::priority_queue<Command>& queue) {
         // Move the top element out safely
         dst = std::move(const_cast<Command&>(queue.top()));
         queue.pop();
@@ -497,13 +442,11 @@ cdef extern from *:
     cppclass Command:
         double priority
         int64_t uuid
-        PyObject* future
 
         Command()
-        Command(double p, int64_t u, object f)
-        Future get_future()
+        Command(double p, int64_t u)
 
-    void move_top_from_queue(Command& dst, priority_queue[Command]& queue)
+    void queue_pop_top(Command& dst, priority_queue[Command]& queue)
 
 @cython.final
 cdef class ThreadPool:
@@ -637,23 +580,22 @@ cdef class ThreadPool:
     - Avoid running CPU-intensive tasks with excessive parallelism as this can degrade performance
     """
     cdef priority_queue[Command] _queue # priority, -uuid
-    cdef int64_t _next_uuid
-    cdef object _futures # uuid to Future, weak references
+    cdef atomic[int64_t] _next_uuid
+    cdef dict _futures # uuid to Future
     cdef object _workers # weak references to workers (WeakKeyDictionary)
-    cdef mutex _mutex
-    cdef mutex _queue_mutex
+    cdef mutex _mutex # mutex for public API
+    cdef mutex _queue_mutex # mutex for queue operations
     cdef condition_variable _work_condition
     cdef atomic[bint] _shutdown
-    cdef atomic[int] _blocking_jobs  # Count of negative priority jobs
-    cdef atomic[long long] _last_blocking_job_finished_us  # Timestamp when last low priority job finished
+    cdef atomic[int32_t] _blocking_jobs  # Count of negative priority jobs
+    cdef atomic[int64_t] _last_blocking_job_finished_us  # Timestamp when last low priority job finished
     cdef int _max_workers
 
     def __cinit__(self):
         self._queue = priority_queue[Command]()
-        self._next_uuid = 0
+        self._next_uuid.store(0)
+        self._futures = dict()
         self._workers = WeakKeyDictionary()
-        #self._mutex = mutex() # For the public API
-        #self._queue_mutex = mutex()
         self._shutdown.store(False)
         self._blocking_jobs.store(0)  # Initialize blocking jobs counter
         self._last_blocking_job_finished_us.store(get_current_time_us())  # Initialize to current time
@@ -673,6 +615,13 @@ cdef class ThreadPool:
         for _ in range(max_workers):
             worker = Worker.create(self)
             self._workers[worker] = None
+
+    def __del__(self):
+        """
+        Destructor to ensure resources are cleaned up
+        """
+        self.shutdown(wait=False)  # Ensure shutdown is called without waiting
+
             
     ### Functions for workers ###
     cdef Future wait_for_work(self):
@@ -749,10 +698,10 @@ cdef class ThreadPool:
             return None
 
         if self._queue.top().priority < 0:
-            move_top_from_queue(element, self._queue)
-            return <object>element.get_future()
+            queue_pop_top(element, self._queue)
+            return self._futures.pop(element.uuid, None)
 
-         # If any blocking jobs is active, top must be negative
+        # If any blocking jobs is active, top must be negative
         if self._blocking_jobs.load() > 0:
             return None
 
@@ -767,8 +716,8 @@ cdef class ThreadPool:
             if current_time_us < last_blocking_time + wait_time_us:
                 return None
 
-        move_top_from_queue(element, self._queue)
-        return <object>element.get_future()
+        queue_pop_top(element, self._queue)
+        return self._futures.pop(element.uuid, None)
 
     cdef void _wait_for_work(self) noexcept nogil:
         """
@@ -816,40 +765,42 @@ cdef class ThreadPool:
 
             return
 
-    cdef void _schedule(self, double priority, Future future):
-        """
-        Make the work visible to workers
-        """
-        cdef unique_lock[mutex] m
-        lock_gil_friendly(m, self._queue_mutex)
-        self._queue.push(Command(priority, future.uuid, future))
-        m.unlock()
-        self._work_condition.notify_one()
-
-    cdef void _on_future_completed(self, Future future, double priority):
+    cdef void on_future_completed(self, Future future, double priority):
         """Called when a future completes"""
+        # Log last medium or high priority job finish time
         if priority <= 0:
             self._last_blocking_job_finished_us.store(get_current_time_us())
-        
+
+        # Unblock the queue if that was the last blocking job
         if priority < 0:
             if self._blocking_jobs.fetch_sub(1) == 1:
                 self._work_condition.notify_all()
 
-    cdef Future _submit(self, double priority, object callable):
+    cdef Future _submit(self, double priority, object callable_info):
         """
         Submit a callable to the threadpool
         """
-        cdef Future future = Future.from_callable(
-            self, callable, self._next_uuid, 
+        cdef unique_lock[mutex] m
+        cdef int64_t uuid = self._next_uuid.fetch_add(1)
+        # Create the future
+        cdef Future future = Future.from_callable_info(
+            self, callable_info, uuid, 
             priority
         )
         
         # If this is a blocking job, increment counter
         if priority < 0:
             self._blocking_jobs.fetch_add(1)
-        
-        self._next_uuid += 1
-        self._schedule(priority, future)
+
+        # Make the work visible to workers
+        self._futures[uuid] = future
+        lock_gil_friendly(m, self._queue_mutex)
+        self._queue.push(Command(priority, uuid))
+        m.unlock()
+
+        # Notify workers that work is available
+        self._work_condition.notify_one()
+
         return future
         
     ### Public API - Similar to standard threadpool API ###
@@ -885,13 +836,7 @@ cdef class ThreadPool:
         if self._shutdown.load():
             raise RuntimeError("cannot schedule new futures after shutdown")
             
-        if args or kwargs:
-            # Wrap the callable with its arguments
-            fn = lambda: callable(*args, **kwargs)
-        else:
-            fn = callable
-            
-        return self._submit(0.0, fn)
+        return self._submit(0.0, (callable, args, kwargs))
         
     def schedule(self, priority, callable, *args, **kwargs):
         """
@@ -936,14 +881,8 @@ cdef class ThreadPool:
         
         if self._shutdown.load():
             raise RuntimeError("cannot schedule new futures after shutdown")
-            
-        if args or kwargs:
-            # Wrap the callable with its arguments
-            fn = lambda: callable(*args, **kwargs)
-        else:
-            fn = callable
-            
-        return self._submit(priority, fn)
+
+        return self._submit(priority, (callable, args, kwargs))
         
     def shutdown(self, wait=True):
         """
@@ -967,31 +906,28 @@ cdef class ThreadPool:
         - If an exception was raised by a future and not retrieved, it will be ignored
         """
 
-        cdef unique_lock[mutex] m
-        cdef Command command
-        cdef list futures
-        cdef Future future
         if wait:
-            lock_gil_friendly(m, self._queue_mutex)
-            while not self._queue.empty():
-                future = <object>self._queue.top().get_future()
-                m.unlock()
+            while len(self._futures) > 0:
                 try:
-                    future.result()
+                    self._futures.values()[0].result()
                 except Exception:
                     pass
-                lock_gil_friendly(m, self._queue_mutex)
-            m.unlock()
 
         self._shutdown.store(True)
         self._work_condition.notify_all()
 
+        cdef unique_lock[mutex] m
+        cdef Command command
+        cdef Future future
         if not wait:
             lock_gil_friendly(m, self._queue_mutex)
             while not self._queue.empty():
-                move_top_from_queue(command, self._queue)
-                future = <object>command.get_future()
-                future.cancel()
+                queue_pop_top(command, self._queue)
+                #m.unlock()
+                future = self._futures.pop(command.uuid, None)
+                if future:
+                    future.cancel()
+                #lock_gil_friendly(m, self._queue_mutex)
             m.unlock()
 
     def __enter__(self):
