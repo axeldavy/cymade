@@ -11,6 +11,7 @@
 #cython: initializedcheck=False
 #cython: c_line_in_traceback=False
 #cython: auto_pickle=False
+#cython: freethreading_compatible=True
 #distutils: language=c++
 
 
@@ -401,7 +402,7 @@ class CancelledError(Exception):
     pass
 
 
-cdef extern from *:
+cdef extern from * nogil:
     """
     struct Command {
         double priority;
@@ -445,7 +446,7 @@ cdef extern from *:
         Command()
         Command(double p, int64_t u)
 
-    void queue_pop_top(Command& dst, priority_queue[Command]& queue)
+    void queue_pop_top(Command& dst, priority_queue[Command]& queue) noexcept
 
 @cython.final
 cdef class ThreadPool:
@@ -634,35 +635,23 @@ cdef class ThreadPool:
         For positive priority jobs, enforce waiting period based on priority in milliseconds.
         """
         cdef Future future
+        cdef int64_t uuid
 
-        """
-        The reason we separate fetch and wait (wait doesn't return the future)
-        is to give advantage to the thread holding the gil to fetch the future
-        over the other threads. This gives significant performance boosts,
-        because the threads waiting for work have a non negligible startup time,
-        while the thread holding the gil is already running and can start immediately.
+        if self._shutdown.load():
+            return None
 
-        Basically:
-        thread A running and holding the GIL for some of its operation
-        thread B is woken up in _wait_for_work because some work is scheduled
-        thread B is stuck when leaving _wait_for_work because to leave
-            the nogil section it must locks the GIL and A has it. Note that
-            at this point is has released the queue mutex. B is thus
-            waiting for A to release the GIL.
-        thread A finishes its work.
-        -> Giving the work to A gives better performance because A is running
-        already. Letting B take over has the overhead of several hundred python
-        operations.
-        """
+        # fast path
+        future = self._fetch_work()
+        if future is not None:
+            return future
 
-        while True:
-            if self._shutdown.load():
-                return None
-            future = self._fetch_work()
-            if future is not None:
-                break
-            with nogil:
-                self._wait_for_work()
+        with nogil:
+            uuid = self._wait_for_work()
+        if uuid < 0:
+            return None # shutdown
+
+        # Fetch the future from the queue
+        future = self._futures.pop(uuid, None)
 
         # Return the future
         return future
@@ -718,7 +707,7 @@ cdef class ThreadPool:
         queue_mutex.unlock()
         return self._futures.pop(element.uuid, None)
 
-    cdef void _wait_for_work(self) noexcept nogil:
+    cdef int64_t _wait_for_work(self) noexcept nogil:
         """
         Internal function of wait_for_work which waits
         that a compatible item is available in the queue.
@@ -727,10 +716,11 @@ cdef class ThreadPool:
         cdef long long current_time_us
         cdef long long last_blocking_time
         cdef long long wait_time_us
+        cdef Command element
 
         while True:
             if self._shutdown.load():
-                return
+                return -1
 
             # Wait the queue is filled, but check every 10 ms if we should shutdown
             if self._queue.empty():
@@ -738,7 +728,8 @@ cdef class ThreadPool:
                 continue
 
             if self._queue.top().priority < 0:
-                return
+                queue_pop_top(element, self._queue)
+                return element.uuid
 
             # If any blocking jobs is active, top must be negative
             if self._blocking_jobs.load() > 0:
@@ -762,7 +753,8 @@ cdef class ThreadPool:
                     )
                     continue
 
-            return
+            queue_pop_top(element, self._queue)
+            return element.uuid
 
     cdef void on_future_completed(self, Future future, double priority):
         """Called when a future completes"""
