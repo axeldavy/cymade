@@ -113,153 +113,7 @@ cdef class Future:
     
     The Future class provides a way to access the result of a function that has been
     executed asynchronously in a thread pool. This implementation is similar to
-    Python's standard `concurrent.futures.Future`, but with important differences
-    that improve performance and efficiency.
-    
-    Key Features:
-    -------------
-    - Efficient Cython implementation with C++ internals for reduced overhead
-    - Direct result storage within the future object itself (no separate result objects)
-    - Uses native C++ mutexes and condition variables for synchronization
-    - Support for callbacks, cancellation, and timeouts
-    - Priority information tracking for integration with ThreadPool scheduler
-    
-    Performance Benefits:
-    --------------------
-    - Reduced memory allocations compared to standard Python futures
-    - Minimal GIL contention during wait operations
-    - Efficient notification system using C++ condition variables
-    - Optimized callback invocation for completed futures
-    
-    Usage Examples:
-    --------------
-    
-    Basic result retrieval:
-    
-    >>> from cymade.threadpool import ThreadPool
-    >>> 
-    >>> with ThreadPool() as pool:
-    ...     # Submit a task that returns a value
-    ...     future = pool.submit(lambda: 42)
-    ...     
-    ...     # Block until the result is ready
-    ...     result = future.result()
-    ...     print(result)
-    42
-    
-    Using callbacks:
-    
-    >>> import time
-    >>> from cymade.threadpool import ThreadPool
-    >>> 
-    >>> def on_complete(future):
-    ...     print(f"Task completed with result: {future.result()}")
-    >>> 
-    >>> with ThreadPool() as pool:
-    ...     future = pool.submit(lambda: time.sleep(0.1) or "Done")
-    ...     future.add_done_callback(on_complete)
-    ...     # Continue with other work while task executes
-    Task completed with result: Done
-    
-    Handling exceptions:
-    
-    >>> from cymade.threadpool import ThreadPool, CancelledError
-    >>> 
-    >>> def might_fail():
-    ...     raise ValueError("Something went wrong")
-    >>> 
-    >>> with ThreadPool() as pool:
-    ...     future = pool.submit(might_fail)
-    ...     try:
-    ...         result = future.result()
-    ...     except ValueError as e:
-    ...         print(f"Caught exception: {e}")
-    Caught exception: Something went wrong
-    
-    Using timeouts:
-    
-    >>> import time
-    >>> from cymade.threadpool import ThreadPool, TimeoutError
-    >>> 
-    >>> def slow_function():
-    ...     time.sleep(0.5)
-    ...     return "Finally done"
-    >>> 
-    >>> with ThreadPool() as pool:
-    ...     future = pool.submit(slow_function)
-    ...     try:
-    ...         # Only wait up to 0.1 seconds
-    ...         result = future.result(timeout=0.1)
-    ...     except TimeoutError:
-    ...         print("Operation timed out")
-    ...     
-    ...     # We can still get the result later
-    ...     result = future.result()
-    ...     print(result)
-    Operation timed out
-    Finally done
-    
-    Cancelling a future:
-    
-    >>> import time
-    >>> from cymade.threadpool import ThreadPool, CancelledError
-    >>> 
-    >>> def slow_operation():
-    ...     time.sleep(1.0)
-    ...     return "This might never be seen"
-    >>> 
-    >>> with ThreadPool() as pool:
-    ...     future = pool.submit(slow_operation)
-    ...     
-    ...     # Try to cancel the operation
-    ...     cancelled = future.cancel()
-    ...     print(f"Cancelled successfully: {cancelled}")
-    ...     
-    ...     try:
-    ...         result = future.result()
-    ...     except CancelledError:
-    ...         print("Future was cancelled")
-    Cancelled successfully: True
-    Future was cancelled
-    
-    Checking future state:
-    
-    >>> import time, threading
-    >>> from cymade.threadpool import ThreadPool
-    >>> 
-    >>> def slow_task():
-    ...     time.sleep(0.2)
-    ...     return "Completed"
-    >>> 
-    >>> with ThreadPool() as pool:
-    ...     future = pool.submit(slow_task)
-    ...     
-    ...     # Check state immediately after submission
-    ...     print(f"Cancelled: {future.cancelled()}")
-    ...     print(f"Running: {future.running()}")
-    ...     print(f"Done: {future.done()}")
-    ...     
-    ...     # Give it time to complete
-    ...     time.sleep(0.3)
-    ...     
-    ...     # Check state after completion
-    ...     print(f"Done now: {future.done()}")
-    ...     print(f"Result: {future.result()}")
-    Cancelled: False
-    Running: False
-    Done: False
-    Done now: True
-    Result: Completed
-    
-    Notes:
-    ------
-    - This implementation is not thread-safe for methods that mutate the Future's state
-      from multiple threads simultaneously.
-    - Callbacks added via add_done_callback() are executed in the order they were added.
-    - Unlike standard futures, this implementation does not propagate exceptions to the
-      thread pool's workers, making it more resilient to task failures.
-    - The result() and exception() methods will block the calling thread until the
-      Future completes or times out.
+    Python's standard `concurrent.futures.Future`
     """
     cdef object _result
     cdef object _exception
@@ -411,60 +265,6 @@ cdef class Future:
             If the Future was cancelled before completing.
         Exception
             Any exception raised during execution of the callable.
-
-        Examples:
-        ---------
-        Basic usage:
-
-        >>> from cymade.threadpool import ThreadPool
-        >>> 
-        >>> def calculate(a, b):
-        ...     return a + b
-        >>> 
-        >>> with ThreadPool() as pool:
-        ...     future = pool.submit(calculate, 2, 3)
-        ...     result = future.result()  # Blocks until the future completes
-        ...     print(result)
-        5
-
-        Using timeout:
-
-        >>> import time
-        >>> from cymade.threadpool import ThreadPool, TimeoutError
-        >>> 
-        >>> def slow_operation():
-        ...     time.sleep(2)  # Simulate a slow operation
-        ...     return "Done!"
-        >>> 
-        >>> with ThreadPool() as pool:
-        ...     future = pool.submit(slow_operation)
-        ...     try:
-        ...         # Only wait for 1 second
-        ...         result = future.result(timeout=1)
-        ...         print(result)
-        ...     except TimeoutError:
-        ...         print("Operation timed out")
-        ...     
-        ...     # We can still wait for the result later
-        ...     result = future.result()  # Wait until completion
-        ...     print(result)
-        Operation timed out
-        Done!
-
-        Handling exceptions:
-
-        >>> from cymade.threadpool import ThreadPool
-        >>> 
-        >>> def failing_operation():
-        ...     raise ValueError("Something went wrong")
-        >>> 
-        >>> with ThreadPool() as pool:
-        ...     future = pool.submit(failing_operation)
-        ...     try:
-        ...         result = future.result()
-        ...     except ValueError as e:
-        ...         print(f"Caught error: {e}")
-        Caught error: Something went wrong
         """
         if self._cancelled:
             raise CancelledError()
@@ -501,66 +301,6 @@ cdef class Future:
             If the timeout expires before the Future completes.
         CancelledError
             If the Future was cancelled before completing.
-
-        Examples:
-        ---------
-        Basic usage:
-
-        >>> from cymade.threadpool import ThreadPool
-        >>> 
-        >>> def operation_with_error():
-        ...     raise ValueError("Test error")
-        >>> 
-        >>> with ThreadPool() as pool:
-        ...     future = pool.submit(operation_with_error)
-        ...     # Wait for the future to complete
-        ...     exc = future.exception()
-        ...     if exc:
-        ...         print(f"Operation failed with: {exc}")
-        ...     else:
-        ...         print("Operation succeeded")
-        Operation failed with: Test error
-
-        Checking for success:
-
-        >>> def successful_operation():
-        ...     return "Success!"
-        >>> 
-        >>> with ThreadPool() as pool:
-        ...     future = pool.submit(successful_operation)
-        ...     exc = future.exception()
-        ...     if exc is None:
-        ...         print(f"Operation succeeded with result: {future.result()}")
-        ...     else:
-        ...         print(f"Operation failed: {exc}")
-        Operation succeeded with result: Success!
-
-        Error handling pattern:
-
-        >>> from cymade.threadpool import ThreadPool
-        >>> 
-        >>> def might_fail(value):
-        ...     if value < 0:
-        ...         raise ValueError("Value cannot be negative")
-        ...     return value * 2
-        >>> 
-        >>> with ThreadPool() as pool:
-        ...     # Submit multiple tasks with different inputs
-        ...     futures = [
-        ...         pool.submit(might_fail, i) for i in [-1, 0, 1, 2]
-        ...     ]
-        ...     
-        ...     # Process results and handle exceptions
-        ...     for i, future in enumerate(futures):
-        ...         exc = future.exception()
-        ...         if exc:
-        ...             print(f"Task {i} failed: {exc}")
-        ...         else:
-        ...             print(f"Task {i} succeeded: {future.result()}")
-        Task 0 failed: Value cannot be negative
-        Task 1 succeeded: 0
-        Task 2 succeeded: 2
-        Task 3 succeeded: 4
         """
         if self._cancelled:
             raise CancelledError()
@@ -591,78 +331,6 @@ cdef class Future:
           called immediately.
         - Callbacks are executed by the thread that completes the Future, not by
           a separate thread.
-
-        Examples:
-        ---------
-        Basic callback usage:
-
-        >>> from cymade.threadpool import ThreadPool
-        >>> 
-        >>> def on_complete(future):
-        ...     try:
-        ...         result = future.result()
-        ...         print(f"Task completed with result: {result}")
-        ...     except Exception as e:
-        ...         print(f"Task failed with error: {e}")
-        >>> 
-        >>> with ThreadPool() as pool:
-        ...     # Submit a task
-        ...     future = pool.submit(lambda: 42)
-        ...     
-        ...     # Add a callback to be called when the task completes
-        ...     future.add_done_callback(on_complete)
-        ...     
-        ...     # Continue with other work while waiting
-        ...     print("Doing other work...")
-        Doing other work...
-        Task completed with result: 42
-
-        Multiple callbacks:
-
-        >>> from cymade.threadpool import ThreadPool
-        >>> 
-        >>> def log_completion(future):
-        ...     print("Task completed")
-        >>> 
-        >>> def save_result(future):
-        ...     try:
-        ...         result = future.result()
-        ...         print(f"Saving result: {result}")
-        ...     except Exception:
-        ...         print("No result to save")
-        >>> 
-        >>> with ThreadPool() as pool:
-        ...     future = pool.submit(lambda: "Important data")
-        ...     
-        ...     # Add multiple callbacks - they'll be executed in order
-        ...     future.add_done_callback(log_completion)
-        ...     future.add_done_callback(save_result)
-        ...     
-        ...     # Wait for the callbacks to execute
-        ...     time.sleep(0.1)
-        Task completed
-        Saving result: Important data
-
-        Chaining operations with callbacks:
-
-        >>> from cymade.threadpool import ThreadPool
-        >>> 
-        >>> def process_data(data):
-        ...     return data * 2
-        >>> 
-        >>> def submit_next_task(future, pool):
-        ...     # Get the result from the first task
-        ...     result = future.result()
-        ...     
-        ...     # Submit a second task using the result
-        ...     next_future = pool.submit(lambda r: f"Processed: {r}", result)
-        ...     return next_future
-        >>> 
-        >>> with ThreadPool() as pool:
-        ...     future1 = pool.submit(process_data, 21)
-        ...     
-        ...     # When future1 is done, submit another task
-        ...     future1.add_done_callback(lambda f: submit_next_task(f, pool))
         """
         cdef unique_lock[mutex] lock
         lock_gil_friendly(lock, self._mutex)
@@ -1210,29 +878,6 @@ cdef class ThreadPool:
         -------
         RuntimeError
             If the pool has been shut down.
-            
-        Examples:
-        ---------
-        >>> with ThreadPool(max_workers=2) as pool:
-        ...     # Submit a simple function
-        ...     future = pool.submit(pow, 2, 10)
-        ...     result = future.result()
-        ...     print(result)
-        1024
-        
-        >>> # Submit a lambda function
-        >>> with ThreadPool() as pool:
-        ...     future = pool.submit(lambda: "Hello World")
-        ...     print(future.result())
-        Hello World
-        
-        >>> # Submit with keyword arguments
-        >>> def greet(name, greeting="Hello"):
-        ...     return f"{greeting}, {name}!"
-        >>> with ThreadPool() as pool:
-        ...     future = pool.submit(greet, "John", greeting="Hi")
-        ...     print(future.result())
-        Hi, John!
         """
         cdef unique_lock[mutex] m
         lock_gil_friendly(m, self._mutex)
@@ -1285,45 +930,6 @@ cdef class ThreadPool:
         - When a negative priority task completes, a timestamp is recorded
         - Positive priority tasks will wait their priority value (in ms) after the last blocking task
         - Multiple negative priority tasks will execute concurrently
-            
-        Examples:
-        ---------
-        >>> import time
-        >>> with ThreadPool(max_workers=2) as pool:
-        ...     # Submit a high priority task (negative value)
-        ...     high_priority = pool.schedule(-10, lambda: "High Priority Task")
-        ...     
-        ...     # Submit a normal priority task
-        ...     normal_priority = pool.schedule(0, lambda: "Normal Priority Task")
-        ...     
-        ...     # Submit a low priority task that will wait 100ms after blocking tasks
-        ...     low_priority = pool.schedule(100, lambda: "Low Priority Task")
-        ...     
-        ...     # High priority task will run first, regardless of submission order
-        ...     print(high_priority.result())
-        ...     print(normal_priority.result())
-        ...     print(low_priority.result())
-        High Priority Task
-        Normal Priority Task
-        Low Priority Task
-        
-        >>> # Using a blocking task with a computation
-        >>> def intensive_computation(data):
-        ...     # Some CPU-intensive operation
-        ...     result = sum(x*x for x in range(data))
-        ...     return result
-        >>> 
-        >>> with ThreadPool() as pool:
-        ...     # Schedule the intensive computation as blocking
-        ...     blocking_task = pool.schedule(-1, intensive_computation, 1000000)
-        ...     
-        ...     # Schedule some normal tasks
-        ...     normal_tasks = [pool.submit(time.sleep, 0.1) for _ in range(5)]
-        ...     
-        ...     # The blocking task will be prioritized
-        ...     result = blocking_task.result()
-        ...     print(f"Computation result: {result}")
-        Computation result: 333332833333500000
         """
         cdef unique_lock[mutex] m
         lock_gil_friendly(m, self._mutex)
@@ -1359,15 +965,6 @@ cdef class ThreadPool:
         - After shutdown, attempting to submit new tasks will raise RuntimeError
         - This method may be called multiple times safely
         - If an exception was raised by a future and not retrieved, it will be ignored
-        
-        Examples:
-        ---------
-        # Wait for all tasks to complete before proceeding
-        >>> pool.shutdown(wait=True)
-        
-        # Start shutdown process without waiting for completion
-        >>> pool.shutdown(wait=False)
-        >>> # Do other cleanup work while tasks finish
         """
 
         cdef unique_lock[mutex] m
@@ -1408,16 +1005,7 @@ cdef class ThreadPool:
         --------
         ThreadPool
             Returns the ThreadPool instance itself to be used in the context block.
-            
-        Examples:
-        ---------
-        >>> with ThreadPool(max_workers=4) as pool:
-        ...     # Submit tasks to the pool
-        ...     future = pool.submit(lambda x: x*x, 5)
-        ...     result = future.result()
-        ...     print(result)
-        25
-        # Pool automatically shuts down at the end of the context block
+
         """
         return self
         
@@ -1481,31 +1069,6 @@ cdef class ThreadPool:
             If the future was cancelled.
         Exception
             Any exception raised by the callable function.
-            
-        Examples:
-        ---------
-        >>> with ThreadPool(max_workers=2) as pool:
-        ...     # Square each number in parallel
-        ...     results = list(pool.map(lambda x: x*x, range(5)))
-        ...     print(results)
-        [0, 1, 4, 9, 16]
-        
-        >>> # Process multiple iterables
-        >>> with ThreadPool() as pool:
-        ...     results = list(pool.map(lambda x, y: x + y, [1, 2, 3], [10, 20, 30]))
-        ...     print(results)
-        [11, 22, 33]
-        
-        >>> # Using timeout
-        >>> with ThreadPool() as pool:
-        ...     try:
-        ...         for result in pool.map(time.sleep, [0.1, 0.2, 2], timeout=1.0):
-        ...             print("Task completed")
-        ...     except TimeoutError:
-        ...         print("A task took too long")
-        Task completed
-        Task completed
-        A task took too long
         """
         futures = [self.submit(fn, *args) for args in zip(*iterables)]
         for future in futures:
