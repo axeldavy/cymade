@@ -38,7 +38,7 @@ def submission_benchmark_contention():
     executor.shutdown(wait=True, cancel_futures=True)
     
     return {
-        "Task": "Submission Overhead (1M very short tasks)",
+        "Task": "Submission overhead with queue contention (1M very short tasks)",
         "ThreadPool": f"{threadpool_time:.4f}s",
         "ThreadPoolExecutor": f"{executor_time:.4f}s",
         "Speedup": f"{executor_time/threadpool_time:.2f}x"
@@ -74,7 +74,7 @@ def submission_benchmark():
     executor.shutdown(wait=True, cancel_futures=True)
 
     return {
-        "Task": "Submission Overhead (1M long tasks)",
+        "Task": "Submission overhead (1M long tasks)",
         "ThreadPool": f"{threadpool_time:.4f}s",
         "ThreadPoolExecutor": f"{executor_time:.4f}s",
         "Speedup": f"{executor_time/threadpool_time:.2f}x"
