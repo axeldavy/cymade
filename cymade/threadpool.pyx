@@ -21,6 +21,7 @@ from libc.stdint cimport int32_t, int64_t
 cimport cython
 
 from asyncio import get_event_loop
+from collections import deque
 from concurrent.futures import TimeoutError, CancelledError
 from os import cpu_count
 from threading import Thread
@@ -605,26 +606,41 @@ cdef class ThreadPool:
     - For long-running applications, consider using multiple pools for different task categories
     - Avoid running CPU-intensive tasks with excessive parallelism as this can degrade performance
     """
-    cdef priority_queue[Command] _queue # priority, -uuid
-    cdef atomic[int64_t] _next_uuid
-    cdef dict _futures # uuid to Future
+
+    # We use a fast path (deque) for normal priority jobs
+    # which are the most common case.
+    cdef mutex _queue_mutex # mutex for any queue operation
+    cdef priority_queue[Command] _negative_priority_queue # priority, -uuid
+    cdef object _normal_priority_queue # deque
+    cdef int _num_normal_priority_jobs # Count of normal priority jobs, to avoid gil
+    cdef priority_queue[Command] _positive_priority_queue # priority, -uuid
+    cdef dict _negative_priority_futures # uuid to Future
+    cdef dict _positive_priority_futures # uuid to Future
+
+    cdef condition_variable _work_condition # Condition variable for workers to wait for work
+    cdef atomic[int32_t] _unfinished_blocking_jobs  # Count of negative priority jobs
+    cdef atomic[int64_t] _last_blocking_job_finished_us  # Timestamp when last negative priority job finished
+
+    cdef atomic[int64_t] _next_uuid # Atomic counter for unique future UUIDs
     cdef object _workers # weak references to workers (WeakKeyDictionary)
     cdef mutex _mutex # mutex for public API
-    cdef mutex _queue_mutex # mutex for queue operations
-    cdef condition_variable _work_condition
     cdef atomic[bint] _shutdown
-    cdef atomic[int32_t] _blocking_jobs  # Count of negative priority jobs
-    cdef atomic[int64_t] _last_blocking_job_finished_us  # Timestamp when last low priority job finished
     cdef int _max_workers
 
     def __cinit__(self):
-        self._queue = priority_queue[Command]()
+        self._negative_priority_queue = priority_queue[Command]()
+        self._normal_priority_queue = deque()
+        self._num_normal_priority_jobs = 0
+        self._positive_priority_queue = priority_queue[Command]()
+        self._negative_priority_futures = dict()
+        self._positive_priority_futures = dict()
+
+        self._unfinished_blocking_jobs.store(0)  # Initialize blocking jobs counter
+        self._last_blocking_job_finished_us.store(get_current_time_us())  # Initialize to current time
+
         self._next_uuid.store(0)
-        self._futures = dict()
         self._workers = WeakKeyDictionary()
         self._shutdown.store(False)
-        self._blocking_jobs.store(0)  # Initialize blocking jobs counter
-        self._last_blocking_job_finished_us.store(get_current_time_us())  # Initialize to current time
         self._max_workers = 0
 
     def __init__(self, max_workers=None):
@@ -636,10 +652,10 @@ cdef class ThreadPool:
         if max_workers is None:
             max_workers = cpu_count() or 1
         self._max_workers = max_workers
-        
+
         # Start the workers
         for _ in range(max_workers):
-            worker = Worker.create(self)
+            worker = Worker.create(self) # TODO: on demand workers
             self._workers[worker] = None
 
     def __del__(self):
@@ -661,26 +677,19 @@ cdef class ThreadPool:
         For positive priority jobs, enforce waiting period based on priority in milliseconds.
         """
         cdef Future future
-        cdef int64_t uuid
 
-        if self._shutdown.load():
-            return None
+        while True:
+            if self._shutdown.load():
+                break
 
-        # fast path
-        future = self._fetch_work()
-        if future is not None:
-            return future
+            future = self._fetch_work()
+            if future is not None:
+                return future
 
-        with nogil:
-            uuid = self._wait_for_work()
-        if uuid < 0:
-            return None # shutdown
+            with nogil:
+                self._wait_for_work()
 
-        # Fetch the future from the queue
-        future = self._futures.pop(uuid, None)
-
-        # Return the future
-        return future
+        return None
 
     def report_error(self, Future future, Exception e, str traceback) -> None:
         """
@@ -706,34 +715,40 @@ cdef class ThreadPool:
         if not queue_mutex.try_lock():
             return None
 
-        if self._queue.empty():
+        # Check negative priority queue first
+        if not self._negative_priority_queue.empty():
+            queue_pop_top(element, self._negative_priority_queue)
+            return self._negative_priority_futures.pop(element.uuid, None)
+
+        # Check if there are unfinished blocking jobs
+        if self._unfinished_blocking_jobs.load() > 0:
+            # If there are blocking jobs, we only process negative priority jobs
             return None
 
-        if self._queue.top().priority < 0:
-            queue_pop_top(element, self._queue)
-            queue_mutex.unlock()
-            return self._futures.pop(element.uuid, None)
+        # Check normal priority queue
+        if self._num_normal_priority_jobs > 0:
+            self._num_normal_priority_jobs -= 1
+            return self._normal_priority_queue.popleft()
 
-        # If any blocking jobs is active, top must be negative
-        if self._blocking_jobs.load() > 0:
-            return None
-
-        # Check time-based priority for positive priority jobs
-        if self._queue.top().priority > 0:
+        if not self._positive_priority_queue.empty():
+            # If there are positive priority jobs, we need to check the top element
+            element = self._positive_priority_queue.top()
             current_time_us = get_current_time_us()
             last_blocking_time = self._last_blocking_job_finished_us.load()
             # Convert priority in ms to microseconds
-            wait_time_us = seconds_to_us(self._queue.top().priority / 1000.0)
+            wait_time_us = seconds_to_us(element.priority / 1000.0)
 
             # If not enough time has passed, wait and try again
             if current_time_us < last_blocking_time + wait_time_us:
                 return None
+            # Pop the top element from the positive priority queue
+            # and return its future
+            queue_pop_top(element, self._positive_priority_queue)
+            return self._positive_priority_futures.pop(element.uuid, None)
 
-        queue_pop_top(element, self._queue)
-        queue_mutex.unlock()
-        return self._futures.pop(element.uuid, None)
+        return None  # No work available
 
-    cdef int64_t _wait_for_work(self) noexcept nogil:
+    cdef void _wait_for_work(self) noexcept nogil:
         """
         Internal function of wait_for_work which waits
         that a compatible item is available in the queue.
@@ -746,41 +761,49 @@ cdef class ThreadPool:
 
         while True:
             if self._shutdown.load():
-                return -1
+                return
 
             # Wait the queue is filled, but check every 10 ms if we should shutdown
-            if self._queue.empty():
+            if self._negative_priority_queue.empty() and \
+               self._num_normal_priority_jobs == 0 and \
+               self._positive_priority_queue.empty():
                 self._work_condition.wait_for(queue_mutex, to_chrono_us(10000))
                 continue
 
-            if self._queue.top().priority < 0:
-                queue_pop_top(element, self._queue)
-                return element.uuid
+            if not self._negative_priority_queue.empty():
+                return
 
-            # If any blocking jobs is active, top must be negative
-            if self._blocking_jobs.load() > 0:
+            # If any blocking jobs is active, we do not start non-blocking jobs
+            if self._unfinished_blocking_jobs.load() > 0:
                 self._work_condition.wait_for(queue_mutex, to_chrono_us(10000))
                 continue
 
-            # Check time-based priority for positive priority jobs
-            if self._queue.top().priority > 0:
-                current_time_us = get_current_time_us()
-                last_blocking_time = self._last_blocking_job_finished_us.load()
-                # Convert priority in ms to microseconds
-                wait_time_us = seconds_to_us(self._queue.top().priority / 1000.0)
-                # clamp wait to 10ms to check for shutdowns
-                wait_time_us = min(wait_time_us, 10000)
+            # Check if there are normal priority jobs
+            if self._num_normal_priority_jobs > 0:
+                return
 
-                # If not enough time has passed, wait and try again
-                if current_time_us < last_blocking_time + wait_time_us:
-                    self._work_condition.wait_for(
-                        queue_mutex,
-                        to_chrono_us(last_blocking_time + wait_time_us - current_time_us + 1)
-                    )
-                    continue
+            # The work available it a positive priority job
+            if self._positive_priority_queue.empty():
+                return # Just for safety, should not happen
 
-            queue_pop_top(element, self._queue)
-            return element.uuid
+            element = self._positive_priority_queue.top()
+
+            current_time_us = get_current_time_us()
+            last_blocking_time = self._last_blocking_job_finished_us.load()
+            # Convert priority in ms to microseconds
+            wait_time_us = seconds_to_us(element.priority / 1000.0)
+            # clamp wait to 10ms to check for shutdowns
+            wait_time_us = min(wait_time_us, 10000)
+
+            # If not enough time has passed, wait and try again
+            if current_time_us < last_blocking_time + wait_time_us:
+                self._work_condition.wait_for(
+                    queue_mutex,
+                    to_chrono_us(last_blocking_time + wait_time_us - current_time_us + 1)
+                )
+                continue
+
+            return  # We can process the positive priority job
 
     cdef void on_future_completed(self, Future future, double priority):
         """Called when a future completes"""
@@ -790,7 +813,7 @@ cdef class ThreadPool:
 
         # Unblock the queue if that was the last blocking job
         if priority < 0:
-            if self._blocking_jobs.fetch_sub(1) == 1:
+            if self._unfinished_blocking_jobs.fetch_sub(1) == 1:
                 self._work_condition.notify_all()
 
     cdef Future _submit(self, double priority, object callable_info):
@@ -804,15 +827,21 @@ cdef class ThreadPool:
             self, callable_info, uuid, 
             priority
         )
-        
-        # If this is a blocking job, increment counter
-        if priority < 0:
-            self._blocking_jobs.fetch_add(1)
 
-        # Make the work visible to workers
-        self._futures[uuid] = future
         lock_gil_friendly(m, self._queue_mutex)
-        self._queue.push(Command(priority, uuid))
+        # Dispatch the future based on priority
+        if priority < 0:
+            self._unfinished_blocking_jobs.fetch_add(1)
+            self._negative_priority_queue.push(Command(priority, uuid))
+            self._negative_priority_futures[uuid] = future
+        elif priority == 0:
+            # Normal priority jobs are stored in a deque for fast access
+            self._normal_priority_queue.append(future)
+            self._num_normal_priority_jobs += 1
+        else:
+            self._positive_priority_queue.push(Command(priority, uuid))
+            self._positive_priority_futures[uuid] = future
+
         m.unlock()
 
         # Notify workers that work is available
@@ -901,7 +930,7 @@ cdef class ThreadPool:
 
         return self._submit(priority, (callable, args, kwargs))
         
-    def shutdown(self, wait=True):
+    def shutdown(self, wait=True, *, cancel_futures=False):
         """
         Signal the executor that it should free any resources and shut down.
         
@@ -915,37 +944,49 @@ cdef class ThreadPool:
             executing, including both running and queued futures.
             If False, the method returns immediately and resources will be freed 
             when all futures are done executing.
+        cancel_futures : bool, default=False
+            If True, all pending futures will be cancelled and their results will not be available.
         
         Notes:
         ------
         - After shutdown, attempting to submit new tasks will raise RuntimeError
         - This method may be called multiple times safely
-        - If an exception was raised by a future and not retrieved, it will be ignored
         """
 
-        if wait:
-            while len(self._futures) > 0:
-                try:
-                    self._futures.values()[0].result()
-                except Exception:
-                    pass
+        cdef unique_lock[mutex] m, m2
+        lock_gil_friendly(m, self._mutex) # prevents new tasks from being submitted until we set the shutdown flag
 
+        # If we are shutting down, we can skip the rest
+        if self._shutdown.load():
+            return
+
+        # Lock the queue mutex to prevent workers from accessing the queue
+        # while we are listing the pending futures
+        lock_gil_friendly(m2, self._queue_mutex)
+        cdef list pending_futures = []
+        pending_futures.extend(self._negative_priority_futures.values())
+        pending_futures.extend(self._normal_priority_queue)
+        pending_futures.extend(self._positive_priority_futures.values())
+
+        # If we are cancelling futures, cancel them
+        if cancel_futures:
+            for future in pending_futures:
+                if not future.cancelled():
+                    future.cancel()
+
+        m2.unlock() # let workers access the queue
+
+        if wait:
+            pending_futures.reverse()  # Reverse to wait on the likeliest to finish last
+            for future in pending_futures:
+                try:
+                    future.result(timeout=None)  # Wait for each future to complete
+                except:
+                    pass  # Ignore errors
+
+        # Notify workers to stop
         self._shutdown.store(True)
         self._work_condition.notify_all()
-
-        cdef unique_lock[mutex] m
-        cdef Command command
-        cdef Future future
-        if not wait:
-            lock_gil_friendly(m, self._queue_mutex)
-            while not self._queue.empty():
-                queue_pop_top(command, self._queue)
-                #m.unlock()
-                future = self._futures.pop(command.uuid, None)
-                if future:
-                    future.cancel()
-                #lock_gil_friendly(m, self._queue_mutex)
-            m.unlock()
 
     def __enter__(self):
         """
