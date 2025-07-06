@@ -76,3 +76,15 @@ Explanation of the results:
 - For intensive tasks, using either makes no difference... Except `ThreadPool` supports jobs with priority.
 
 Note that for speed, the Future returned by `submit` is not a subclass of `concurrent.futures.Future` and thus won't be accepted by some APIs requiring a direct subclass of it. As it won't work with asyncio's `wrap_future`, we've added the feature that you can await directly the future in your asyncio loop (It is not needed in any way to use asyncio to use `ThreadPool`.)
+
+
+# Testing this package
+
+The packaging for this package is not completly ready.
+If pip install fails you can use:
+`python3 setup.py build_ext --inplace`
+
+Then copy paste the built dir to your site-packages:
+`cp -r build/lib.linux-x86_64-cpython-313t/cymade ~/.venv/lib/python3.13t/site-packages/`
+
+Adapt paths to your config.
