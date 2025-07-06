@@ -4,12 +4,25 @@ Currently implemented are:
 
 # Atomics
 
-Atomics are a useful too in parallel programming. The fastest way with the
-standard library is to use a threading.Lock() to increment/decrement your variable.
+Atomics are a useful tool in parallel programming. The fastest way to replicate this
+feature with the
+standard Python library is to use a threading.Lock() to increment/decrement your variable.
 
 This package provides several very fast atomics, including a counter that
 calls an optional callback when it reaches zero.
 
+
+## Python 3.13.5t, 4 × Intel® Core™ i5-4690 CPU @ 3.50GHz, Arch Linux
+
+| Test Case                                    | cymade.atomic   | threading.Lock   | Normal                    | Speedup   |
+|:---------------------------------------------|:----------------|:-----------------|:--------------------------|:----------|
+| Single-thread increment (1M)                 | 0.043457s       | 0.335875s        | 0.039278s                 | 7.73x     |
+| Multi-thread increment (4 threads, 1M total) | 0.144691s       | 0.589613s        | N/A (not thread-safe)     | 4.07x     |
+| Float operations (1M)                        | 0.076239s       | 0.575736s        | 0.049017s                 | 7.55x     |
+| Multi-thread float ops (4 threads, 1M total) | 0.405201s       | 1.015052s        | N/A (not thread-safe)     | 2.51x     |
+| High contention (20 threads, 2M total)       | 0.286716s       | 1.105103s        | N/A (not thread-safe)     | 3.85x     |
+| On-zero callback (100K)                      | 0.016224s       | 0.071702s        | N/A (no callback support) | 4.42x     |
+| Event toggle (1M)                            | N/A             | 0.593124s        | N/A                       | N/A       |
 
 # ThreadPool
 
