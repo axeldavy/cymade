@@ -11,18 +11,28 @@ standard Python library is to use a threading.Lock() to increment/decrement your
 This package provides several very fast atomics, including a counter that
 calls an optional callback when it reaches zero.
 
+Available atomics are:
+- U64: for counters. Does support calling a callback when it reaches zero
+- I64: integers
+- Int: Integers with arbitrary precision (like Python's `int` ). I64 should be enough for 99.9% of needs
+- Float: floating point
 
 ## Python 3.13.5t, 4 × Intel® Core™ i5-4690 CPU @ 3.50GHz, Arch Linux
 
-| Test Case                                    | cymade.atomic   | threading.Lock   | Normal                    | Speedup   |
-|:---------------------------------------------|:----------------|:-----------------|:--------------------------|:----------|
-| Single-thread increment (1M)                 | 0.043457s       | 0.335875s        | 0.039278s                 | 7.73x     |
-| Multi-thread increment (4 threads, 1M total) | 0.144691s       | 0.589613s        | N/A (not thread-safe)     | 4.07x     |
-| Float operations (1M)                        | 0.076239s       | 0.575736s        | 0.049017s                 | 7.55x     |
-| Multi-thread float ops (4 threads, 1M total) | 0.405201s       | 1.015052s        | N/A (not thread-safe)     | 2.51x     |
-| High contention (20 threads, 2M total)       | 0.286716s       | 1.105103s        | N/A (not thread-safe)     | 3.85x     |
-| On-zero callback (100K)                      | 0.016224s       | 0.071702s        | N/A (no callback support) | 4.42x     |
-| Event toggle (1M)                            | N/A             | 0.593124s        | N/A                       | N/A       |
+| Test Case                                    | cymade.atomic   | threading.Lock   | Normal                      | Speedup   |
+|:---------------------------------------------|:----------------|:-----------------|:----------------------------|:----------|
+| Single-thread increment (1M)                 | 0.038314s       | 0.337002s        | 0.039194s                   | 8.80x     |
+| Multi-thread increment (4 threads, 1M total) | 0.138783s       | 0.597176s        | 0.096429s (not thread-safe) | 4.30x     |
+| Float operations (1M)                        | 0.055080s       | 0.575025s        | 0.049287s                   | 10.44x    |
+| Multi-thread float ops (4 threads, 1M total) | 0.203577s       | 1.003171s        | 0.162361s (not thread-safe) | 4.93x     |
+| High contention (20 threads, 2M total)       | 0.290452s       | 1.100565s        | 0.176304s (not thread-safe) | 3.79x     |
+| On-zero callback (100K)                      | 0.027623s       | 0.078574s        | N/A (no callback support)   | 2.84x     |
+| Event toggle (1M)                            | N/A             | 0.596541s        | N/A                         | N/A       |
+
+Explanation of the results:
+- Python's `int` and `float` do not have thread-safety guarantee. Cymade's items do add an overhead,
+    but it is small.
+- Cymade's atomic items are significantly faster than using items protected by threading's Lock. 
 
 # ThreadPool
 

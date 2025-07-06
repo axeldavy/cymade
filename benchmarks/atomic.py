@@ -109,17 +109,6 @@ def single_thread_increment(counter_type, iterations=1000000):
     return end - start
 
 
-def single_thread_increment_normal(iterations=1000000):
-    """Benchmark single-threaded incrementation with a regular variable"""
-    counter = 0
-    
-    start = time.perf_counter()
-    for _ in range(iterations):
-        counter += 1
-    end = time.perf_counter()
-    
-    return end - start
-
 
 def multi_thread_increment(counter_type, num_threads=4, iterations_per_thread=250000):
     """Benchmark multi-threaded incrementation"""
@@ -146,7 +135,8 @@ def multi_thread_increment(counter_type, num_threads=4, iterations_per_thread=25
     # Verify result to ensure atomicity worked
     expected = num_threads * iterations_per_thread
     actual = int(counter)
-    assert actual == expected
+    if actual != expected:
+        print (f"Type {type(counter)}: Expected {expected}, but got {actual}")
 
     return end - start
 
@@ -169,19 +159,6 @@ def event_toggle_benchmark(iterations=1000000):
 def float_operations(float_type, iterations=1000000):
     """Benchmark floating point operations"""
     value = float_type(1.0)
-    
-    start = time.perf_counter()
-    for i in range(iterations):
-        value *= 1.01
-        value /= 1.01
-    end = time.perf_counter()
-    
-    return end - start
-
-
-def float_operations_normal(iterations=1000000):
-    """Benchmark floating point operations with a regular variable"""
-    value = 1.0
     
     start = time.perf_counter()
     for i in range(iterations):
@@ -236,7 +213,8 @@ def contended_updates(counter_type, num_threads=20, iterations_per_thread=100000
     
     expected = num_threads * iterations_per_thread
     actual = int(counter)
-    assert actual == expected
+    if actual != expected:
+        print(f"Type {type(counter)}: Expected {expected}, but got {actual}")
     
     return end - start
 
@@ -273,7 +251,7 @@ def run_benchmarks():
     # Single-threaded increment
     cymade_time = single_thread_increment(U64)
     lock_time = single_thread_increment(LockCounter)
-    normal_time = single_thread_increment_normal()
+    normal_time = single_thread_increment(int)
     
     results.append({
         "Test": "Single-thread increment (1M)",
@@ -286,19 +264,20 @@ def run_benchmarks():
     # Multi-threaded increment
     cymade_time = multi_thread_increment(U64)
     lock_time = multi_thread_increment(LockCounter)
+    normal_time = multi_thread_increment(int)
     
     results.append({
         "Test": "Multi-thread increment (4 threads, 1M total)",
         "cymade.atomic": f"{cymade_time:.6f}s",
         "threading.Lock": f"{lock_time:.6f}s",
-        "Normal Variable": "N/A (not thread-safe)",
+        "Normal Variable": f"{normal_time:.6f}s (not thread-safe)",
         "Speedup vs Lock": f"{lock_time/cymade_time:.2f}x"
     })
     
     # Float operations
     cymade_float_time = float_operations(Float)
     lock_float_time = float_operations(LockFloat)
-    normal_float_time = float_operations_normal()
+    normal_float_time = float_operations(float)
     
     results.append({
         "Test": "Float operations (1M)",
@@ -311,24 +290,26 @@ def run_benchmarks():
     # Multi-threaded float operations
     cymade_float_mt_time = multi_thread_float(Float)
     lock_float_mt_time = multi_thread_float(LockFloat)
+    normal_float_mt_time = multi_thread_float(float)
     
     results.append({
         "Test": "Multi-thread float ops (4 threads, 1M total)",
         "cymade.atomic": f"{cymade_float_mt_time:.6f}s",
         "threading.Lock": f"{lock_float_mt_time:.6f}s",
-        "Normal Variable": "N/A (not thread-safe)",
+        "Normal Variable": f"{normal_float_mt_time:.6f}s (not thread-safe)",
         "Speedup vs Lock": f"{lock_float_mt_time/cymade_float_mt_time:.2f}x"
     })
     
     # High contention updates
     cymade_contended_time = contended_updates(U64)
     lock_contended_time = contended_updates(LockCounter)
+    normal_contended_time = contended_updates(int)  # Not thread-safe, but for comparison
     
     results.append({
         "Test": "High contention (20 threads, 2M total)",
         "cymade.atomic": f"{cymade_contended_time:.6f}s",
         "threading.Lock": f"{lock_contended_time:.6f}s",
-        "Normal Variable": "N/A (not thread-safe)",
+        "Normal Variable": f"{normal_contended_time:.6f}s (not thread-safe)",
         "Speedup vs Lock": f"{lock_contended_time/cymade_contended_time:.2f}x"
     })
     
