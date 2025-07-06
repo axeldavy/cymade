@@ -1,19 +1,22 @@
 from cymade.threadpool import ThreadPool
 from concurrent.futures import ThreadPoolExecutor
+import gc
 import math
-import numpy as np
 import tabulate
 import threading
 import time
 
-def submission_benchmark():
-    """Benchmark the submission overhead of ThreadPool vs ThreadPoolExecutor"""
+gc.disable()  # Disable garbage collection for benchmarking
+
+def submission_benchmark_contention():
+    """Benchmark the submission overhead (contention case) of ThreadPool vs ThreadPoolExecutor"""
     # Create a ThreadPool
     threadpool = ThreadPool(4)
     # Create a ThreadPoolExecutor
     executor = ThreadPoolExecutor(4)
 
     # Define a function that will be executed
+    # as it is very short, there will be queue contention
     def f(x):
         return x**2
     
@@ -25,19 +28,58 @@ def submission_benchmark():
     for i in range(n):
         threadpool.submit(f, i)
     threadpool_time = time.perf_counter() - start
+    threadpool.shutdown(wait=True, cancel_futures=True)
 
     # Measure the time taken by the ThreadPoolExecutor
     start = time.perf_counter()
     for i in range(n):
         executor.submit(f, i)
     executor_time = time.perf_counter() - start
+    executor.shutdown(wait=True, cancel_futures=True)
     
     return {
-        "Task": "Submission Overhead (1M tasks)",
+        "Task": "Submission Overhead (1M very short tasks)",
         "ThreadPool": f"{threadpool_time:.4f}s",
         "ThreadPoolExecutor": f"{executor_time:.4f}s",
         "Speedup": f"{executor_time/threadpool_time:.2f}x"
     }
+
+def submission_benchmark():
+    """Benchmark the submission overhead (no contention) of ThreadPool vs ThreadPoolExecutor"""
+    # Create a ThreadPool
+    threadpool = ThreadPool(4)
+    # Create a ThreadPoolExecutor
+    executor = ThreadPoolExecutor(4)
+
+    # Define a function that will be executed
+    def f(x):
+        time.sleep(0.1)  # Simulate some long operation
+        return x**2
+    
+    # Define the number of iterations
+    n = 1000000
+
+    # Measure the time taken by the ThreadPool
+    start = time.perf_counter()
+    for i in range(n):
+        threadpool.submit(f, i)
+    threadpool_time = time.perf_counter() - start
+    threadpool.shutdown(wait=True, cancel_futures=True)
+
+    # Measure the time taken by the ThreadPoolExecutor
+    start = time.perf_counter()
+    for i in range(n):
+        executor.submit(f, i)
+    executor_time = time.perf_counter() - start
+    executor.shutdown(wait=True, cancel_futures=True)
+
+    return {
+        "Task": "Submission Overhead (1M long tasks)",
+        "ThreadPool": f"{threadpool_time:.4f}s",
+        "ThreadPoolExecutor": f"{executor_time:.4f}s",
+        "Speedup": f"{executor_time/threadpool_time:.2f}x"
+    }
+
 
 def launch_overhead_benchmark():
     """Benchmark the overhead to start work items of ThreadPool vs ThreadPoolExecutor"""
@@ -57,14 +99,14 @@ def launch_overhead_benchmark():
     start = time.perf_counter()
     for i in range(n):
         threadpool.submit(f, i)
-    threadpool.shutdown()
+    threadpool.shutdown(wait=True, cancel_futures=False)
     threadpool_time = time.perf_counter() - start
 
     # Measure the time taken by the ThreadPoolExecutor
     start = time.perf_counter()
     for i in range(n):
         executor.submit(f, i)
-    executor.shutdown()
+    executor.shutdown(wait=True, cancel_futures=False)
     executor_time = time.perf_counter() - start
     
     return {
@@ -466,6 +508,7 @@ def run_comprehensive_benchmark():
     results = []
     
     # Run all benchmarks
+    results.append(submission_benchmark_contention())
     results.append(submission_benchmark())
     results.append(launch_overhead_benchmark())
     results.append(cpu_bound_benchmark(num_workers=4, num_tasks=1000))
