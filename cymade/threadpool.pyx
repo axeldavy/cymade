@@ -30,7 +30,39 @@ from weakref import WeakKeyDictionary
 
 from .cpp_includes cimport mutex, unique_lock, condition_variable, defer_lock_t
 from .cpp_includes cimport atomic
-from .atomic cimport lock_gil_friendly
+
+# From DearCyGui
+cdef void lock_gil_friendly_block(unique_lock[mutex] &m) noexcept:
+    """
+    Same as lock_gil_friendly, but blocks until the job is done.
+    We inline the fast path, but not this one as it generates
+    more code.
+    """
+    # Release the gil to enable python processes eventually
+    # holding the lock to run and release it.
+    # Block until we get the lock
+    cdef bint locked = False
+    while not(locked):
+        with nogil:
+            # Block until the mutex is released
+            m.lock()
+            # Unlock to prevent deadlock if another
+            # thread holding the gil requires m
+            # somehow
+            m.unlock()
+        locked = m.try_lock()
+
+cdef inline void lock_gil_friendly(unique_lock[mutex] &m,
+                                   mutex &target_mutex) noexcept:
+    """
+    Must be called to lock our mutexes whenever we hold the gil
+    """
+    m = unique_lock[mutex](target_mutex, defer_lock_t())
+    # Fast path
+    if m.try_lock():
+        return
+    # Slow path
+    lock_gil_friendly_block(m)
 
 cdef extern from * nogil:
     """

@@ -19,8 +19,7 @@
 from libc.math cimport pow as cpow
 from libc.stdint cimport int64_t, uint64_t
 
-from .cpp_includes cimport mutex, unique_lock
-from .atomic cimport lock_gil_friendly
+from .cpp_includes cimport mutex, unique_lock, defer_lock_t
 
 
 # From DearCyGui
@@ -44,6 +43,19 @@ cdef void lock_gil_friendly_block(unique_lock[mutex] &m) noexcept:
             m.unlock()
         locked = m.try_lock()
 
+cdef inline void lock_gil_friendly(unique_lock[mutex] &m,
+                                   mutex &target_mutex) noexcept:
+    """
+    Must be called to lock our mutexes whenever we hold the gil
+    """
+    m = unique_lock[mutex](target_mutex, defer_lock_t())
+    # Fast path
+    if m.try_lock():
+        return
+    # Slow path
+    lock_gil_friendly_block(m)
+
+
 cdef class U64:
     """
     Integer Atomic counter, 64-bit unsigned.
@@ -59,7 +71,7 @@ cdef class U64:
     cdef object on_zero
     cdef mutex m
 
-    def __cinit__(self, uint64_t init_value=0, object on_zero=None):
+    def __init__(self, uint64_t init_value=0, object on_zero=None):
         self.value = init_value
         self.on_zero = on_zero
     
@@ -243,7 +255,7 @@ cdef class Float:
     cdef double value
     cdef mutex m
 
-    def __cinit__(self, double init_value=0.0):
+    def __init__(self, double init_value=0.0):
         self.value = init_value
     
     def __dealloc__(self):
@@ -350,7 +362,7 @@ cdef class Int:
     cdef object value  # Python int object
     cdef mutex m
 
-    def __cinit__(self, object init_value=0):
+    def __init__(self, object init_value=0):
         self.value = init_value
     
     def __dealloc__(self):
@@ -501,7 +513,7 @@ cdef class I64:
     cdef int64_t value
     cdef mutex m
 
-    def __cinit__(self, int64_t init_value=0):
+    def __init__(self, int64_t init_value=0):
         self.value = init_value
     
     def __dealloc__(self):
